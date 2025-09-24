@@ -1,0 +1,2595 @@
+
+
+
+
+# Description of the Study
+
+This R Markdown document simulates the HbA1c outcomes for a population of Type 2 Diabetes (T2D) patients. The simulation includes sociodemographic, clinical, and behavioral factors to model both untreated (Y_0) and treated (Y_1) HbA1c values.
+
+# Overview
+
+-   Source Population: **543,551** (London)
+-   Type 2 Diabetes Population (15%): **81,532**
+-   Treatment Effect Assumed: **-7 mmol/mol **
+
+# Clear Environment and Setup Seed for Reproducibility
+
+```{r}
+set.seed(1234)
+packageVersion("mice")
+R.version.string
+packageVersion("lme4")
+
+```
+
+# Population Characteristics and Simulation Code
+
+Regression Equation Use the regression model: HbA1c=α0+α1⋅Poverty+α2⋅Education+α3⋅Diabetes Duration+α4⋅Insulin Use+ϵ (Baseline HbA1c is correlated with:
+
+Living in poverty (r = 0.21, p < 0.001) → Patients in poverty tend to have higher baseline HbA1c. Education level (r = 0.13, p = 0.022) → Higher education is associated with lower baseline HbA1c. Diabetes duration (r = 0.21, p < 0.001) → Longer diabetes duration is associated with higher baseline HbA1c. Insulin use (r = 0.46, p < 0.001) → Insulin users tend to have higher baseline HbA1c. ) where: • α0: Intercept . • α1,α2,α3,α4: Coefficients representing the effect of each predictor. • ϵ: Random noise to add unexplained variability(unexplained variability in HbA1c after accounting for four predictors.).
+
+real B coeff for predictor in order to generate baseline HbA1c :beta_0 <- 54.6 # Baseline mean HbA1c alpha_poverty <- 6.88 alpha_education <- 3.88 alpha_duration <- 0.4 alpha_insulin <- 16.71
+
+```{r}
+   # Total T2D population size
+n_population <- 81532  # Total T2D population
+
+# Step 1: Generate the population with specified characteristics
+generate_population <- function(n_population) {
+  data.frame(
+    id = 1:n_population,
+    
+    # Age 
+    age_years = round(pmin(pmax(rnorm(n_population, mean = 59.4, sd = 10.8), 31), 83), 1),
+
+    # Gender 
+    gender = rbinom(n_population, 1, 0.5),
+
+    # BMI 
+    bmi_kg_m2 = round(pmin(pmax(rnorm(n_population, mean = 32.4, sd = 7.1), 15), 60), 1),
+
+    # Marginal predictors for baseline HbA1c regression
+    poverty = rbinom(n_population, 1, 0.292),  # 29.2% in poverty
+    education = rbinom(n_population, 1, 0.508),  # 50.8% with ≤ secondary education
+    delta_healthy_eating_days_per_week = round(pmin(pmax(rnorm(n_population, mean = -0.41, sd = 1.8), -7), 7), 1),
+    delta_medication_taking_days_per_week = round(pmin(pmax(rnorm(n_population, mean = -0.07, sd = 1.1), -7), 7), 1),
+    
+    # Diabetes Duration (Used in baseline HbA1c regression)
+    diabetes_duration_years = {
+      diabetes_dur <- round(pmax(rnorm(n_population, mean = 7.3, sd = 7.8), 0.25), 1)
+      long_duration <- diabetes_dur[diabetes_dur > 1]
+      if (length(long_duration) < round(0.8 * n_population)) {
+        long_duration <- c(
+          long_duration, 
+          sample(diabetes_dur[diabetes_dur <= 1], round(0.8 * n_population) - length(long_duration), replace = TRUE)
+        )
+      }
+      sample(long_duration, n_population, replace = TRUE)
+    },  
+    
+    insulin_use = rbinom(n_population, 1, 0.214)  # 21.4% using insulin
+  )
+}
+
+# Step 2: Add Baseline HbA1c dependency (Regression Model)
+add_baseline_hba1c <- function(population) {
+  # Regression coefficients 
+  alpha_0 <- 45  
+  alpha_poverty <- 6.88  
+  alpha_education <- 3.88  
+  alpha_duration <- 0.4  
+  alpha_insulin <- 16.71
+
+  
+  
+  # Generate Baseline HbA1c values
+  population$baseline_hba1c_mmol_mol <- alpha_0 +
+    alpha_poverty * population$poverty +
+    alpha_education * population$education +
+    alpha_duration * population$diabetes_duration_years +
+    alpha_insulin * population$insulin_use +
+    rnorm(nrow(population), mean = 0, sd = 7)
+
+
+  return(population)
+}
+
+# Step 3: Generate the population and add Baseline HbA1c values
+population <- generate_population(n_population)
+population <- add_baseline_hba1c(population)
+
+# Step 4: View summary of the population
+summary(population)
+
+sd(population$baseline_hba1c_mmol_mol)
+```
+
+Regression Model for Y₀ (HbA1c Change Without Treatment):
+
+Y0=β0+βage⋅Age+βduration⋅Diabetes Duration+βbaseline HbA1c⋅Baseline HbA1c+βhealthy eating⋅ΔHealthy Eating+βmedication⋅ΔMedication Taking +βpoverty, medication⋅Poverty⋅ΔMedication Taking+βeducation, medication⋅Education⋅ΔMedication Taking+ε
+
+```{r}
+# Generate y0 (untreated changed HbA1c) and y1 (treated changed HbA1c)
+generate_outcomes <- function(population) {
+
+  # Define coefficients for the regression model
+  beta_0 <- 24  
+  beta_age <- -0.20
+  beta_duration <- 0.30
+  beta_baseline_hba1c <- -0.26
+  beta_healthy_eating <- -1.23
+  beta_medication <- -1.35
+  beta_treatment <- -7  # Treatment effect (reduces changed HbA1c by 7 mmol/mol)
+  
+  # Generate the treatment 
+  set.seed(1234)  # Ensure reproducibility
+  population$trt <- rbinom(nrow(population), 1, 0.5)  # Randomly assign treatment (0 = no, 1 = yes)
+  
+  # Define treatment effect coefficients
+beta_treatment_age <- 0.001  # Interaction: Older patients respond differently
+beta_treatment_hba1c <- 0.005 # Interaction: Higher baseline HbA1c → Greater response
+  
+  
+  # ---------------------
+  # Coefficients for interaction terms
+  beta_poverty_medication <- -0.1  # Poverty × Medication Taking
+  beta_education_medication <- -0.05  # Education × Medication Taking
+    # ---------------------
+
+  
+  # Define residual standard deviation
+  sigma_epsilon_y0<- 10  # Residual SD
+  sigma_epsilon_y1<- 7  # Residual SD
+
+  # Generate random error term for variability
+  epsilon <- rnorm(nrow(population), mean = 0, sd = sigma_epsilon_y0)
+
+
+  # Calculate y0 (changed HbA1c for untreated patients)
+  population$y0 <- beta_0 +
+    beta_age * population$age_years +
+    beta_duration * population$diabetes_duration_years +
+    beta_baseline_hba1c * population$baseline_hba1c_mmol_mol +
+    beta_healthy_eating * population$delta_healthy_eating_days_per_week +
+    beta_medication * population$delta_medication_taking_days_per_week +
+    beta_poverty_medication * population$poverty * population$delta_medication_taking_days_per_week +
+    beta_education_medication * population$education * population$delta_medication_taking_days_per_week +
+    epsilon
+
+
+  # Calculate y1 (changed HbA1c for treated patients)
+
+population$y1 <- population$y0 +
+  beta_treatment + 
+  beta_treatment_age * population$age_years + 
+  beta_treatment_hba1c * population$baseline_hba1c_mmol_mol + 
+  rnorm(nrow(population), mean = 0, sd = sigma_epsilon_y1)
+
+
+  # Round the potential outcomes to 2 decimal places
+  population$y0 <- round(population$y0, 2)
+  population$y1 <- round(population$y1, 2)
+
+  # Return the updated population dataset
+  return(population)
+}
+
+# Generate y0 and y1 based on risk factors and treatment
+population <- generate_outcomes(population)
+sd(population$bmi_kg_m2)
+sum(population$bmi_kg_m2 < 18.5)  # Patients with BMI < 18.5 (underweight)
+sum(population$bmi_kg_m2 > 50)    # Patients with BMI > 50 (extreme obesity)
+sd(population$y0)
+sd(population$y1)
+# View the first few rows of the population data
+head(population)
+
+# Summary statistics for y0 and y1
+summary(population$y0)
+summary(population$y1)
+
+```
+
+# treatment assignment
+
+```{r}
+# Assign final HbA1c outcome based on treatment
+population$Y <- ifelse(population$trt == 0, population$y0, population$y1)
+
+# View the first few rows
+head(population)
+
+# Summary statistics for final HbA1c outcome
+summary(population$Y)
+
+# Fit a linear regression model to estimate the treatment effect
+model <- lm(Y ~ trt, data = population)
+
+# Summarize the regression results
+summary(model)
+
+summary(lm(y1 ~ age_years + baseline_hba1c_mmol_mol, data = population))
+
+hist(residuals(model))
+
+
+par(mfrow=c(1,2))  # Set up plotting window for multiple plots
+hist(residuals(model), breaks = 50, main = "Residuals Histogram", xlab = "Residuals")  
+qqnorm(residuals(model)); qqline(residuals(model), col = "red")  # Q-Q plot
+
+
+```
+
+# generate low/high pragmatism based on strict/ broad criteria and then calculate the mean, SD on order to calculate the samlpe size for each samlpe.
+
+1- define strict criteria for Low Pragmatism (More Explanatory, Controlled Trial) 2- define broad criteria for High Pragmatism (More Real-World, Less Restrictive)
+
+
+#High Pragmatism (Broader, Real-World)
+
+#Age ≥ 50 years  ( – Many RCTs & real-world studies use this cutoff for older, high-risk T2D patients.) Diabetes Duration ≥ 5 years,   – Longer diabetes duration is linked to worse glycemic control & higher treatment resistance.) No Baseline HbA1c restriction No BMI restriction (full dataset)
+(Steven P. et al., 2016, Husain M. et al. 2019, Aroda et al., 2017)
+#Low Pragmatism (Stricter, Controlled Trial)
+
+#Age ≥ 50 years Diabetes Duration ≥ 5 years Baseline HbA1c ≥ 53 mmol/mol(UKPDS Trial (UK Prospective Diabetes Study) – HbA1c ≥ 53 mmol/mol (7%) is often the minimum for intervention trials.) BMI ≥ 30 (Only obese included)(STEP 1 Trial (Wilding et al., 2021) – GLP-1 treatment trials often use BMI ≥ 27 for overweight & BMI ≥ 30 for obese patients.)
+
+```{r}
+# Generate High & Low Pragmatism Populations
+generate_pragmatism_groups <- function(population) {
+  
+   # High Pragmatism: Broad criteria
+  high_pragmatism_population <- subset(population, 
+                                       age_years >= 50 & 
+                                       diabetes_duration_years >= 5)
+
+  # Low Pragmatism: Stricter criteria
+  low_pragmatism_population <- subset(population, 
+                                      age_years >= 50 & 
+                                      diabetes_duration_years >= 5&
+                                        education == 0 &  # Select only higher education patients
+                                        bmi_kg_m2 >= 20 &
+                                baseline_hba1c_mmol_mol >= 53  
+
+                                    )
+                                     
+
+  return(list(high_pragmatism = high_pragmatism_population, 
+              low_pragmatism = low_pragmatism_population))
+}
+
+# Apply function to filter populations
+pragmatism_groups <- generate_pragmatism_groups(population)
+
+# Extract individual groups
+high_pragmatism_population <- pragmatism_groups$high_pragmatism
+low_pragmatism_population <- pragmatism_groups$low_pragmatism
+
+
+
+# Check population sizes
+cat("High Pragmatism Sample Size:", nrow(high_pragmatism_population), "\n")
+cat("Low Pragmatism Sample Size:", nrow(low_pragmatism_population), "\n")
+
+
+```
+
+```{r}
+
+mean(low_pragmatism_population$y1 - low_pragmatism_population$y0)
+summary(high_pragmatism_population$baseline_hba1c_mmol_mol)
+summary(low_pragmatism_population$baseline_hba1c_mmol_mol)
+mean(low_pragmatism_population$y1 - low_pragmatism_population$y0)
+
+
+
+# Estimate Treatment Effect in High Pragmatism Group
+model_high <- lm(Y ~ trt, data = high_pragmatism_population)
+summary(model_high)
+
+# Estimate Treatment Effect in Low Pragmatism Group
+model_low <- lm(Y ~ trt, data = low_pragmatism_population)
+summary(model_low)
+
+# Print Treatment Effect Estimates
+cat("High Pragmatism Treatment Effect:", summary(model_high)$coefficients["trt", "Estimate"], "\n")
+cat("Low Pragmatism Treatment Effect:", summary(model_low)$coefficients["trt", "Estimate"], "\n")
+```
+
+```{r}
+# High Pragmatism: Calculate Mean & SD for Treated and Untreated
+mean_high_treated <- round(mean(high_pragmatism_population$Y[high_pragmatism_population$trt == 1], na.rm = TRUE), 2)
+sd_high_treated <- round(sd(high_pragmatism_population$Y[high_pragmatism_population$trt == 1], na.rm = TRUE), 2)
+
+mean_high_untreated <- round(mean(high_pragmatism_population$Y[high_pragmatism_population$trt == 0], na.rm = TRUE), 2)
+sd_high_untreated <- round(sd(high_pragmatism_population$Y[high_pragmatism_population$trt == 0], na.rm = TRUE), 2)
+
+# Low Pragmatism: Calculate Mean & SD for Treated and Untreated
+mean_low_treated <- round(mean(low_pragmatism_population$Y[low_pragmatism_population$trt == 1], na.rm = TRUE), 2)
+sd_low_treated <- round(sd(low_pragmatism_population$Y[low_pragmatism_population$trt == 1], na.rm = TRUE), 2)
+
+mean_low_untreated <- round(mean(low_pragmatism_population$Y[low_pragmatism_population$trt == 0], na.rm = TRUE), 2)
+sd_low_untreated <- round(sd(low_pragmatism_population$Y[low_pragmatism_population$trt == 0], na.rm = TRUE), 2)
+
+# Print results
+print(paste("High Pragmatism - Treated: Mean =", mean_high_treated, ", SD =", sd_high_treated))
+print(paste("High Pragmatism - Untreated: Mean =", mean_high_untreated, ", SD =", sd_high_untreated))
+
+print(paste("Low Pragmatism - Treated: Mean =", mean_low_treated, ", SD =", sd_low_treated))
+print(paste("Low Pragmatism - Untreated: Mean =", mean_low_untreated, ", SD =", sd_low_untreated))
+
+
+
+summary(low_pragmatism_population$baseline_hba1c_mmol_mol[low_pragmatism_population$trt == 1])
+summary(low_pragmatism_population$baseline_hba1c_mmol_mol[low_pragmatism_population$trt == 0])
+
+table(low_pragmatism_population$trt)
+
+mean(low_pragmatism_population$y1 - low_pragmatism_population$y0)
+
+
+mean(low_pragmatism_population$Y)
+mean(high_pragmatism_population$Y)
+mean(population$Y)
+
+
+
+```
+
+#sample size calculation
+
+```{r}
+# Define parameters
+alpha <- 0.05  # Significance level (95% CI)
+power <- 0.95  # 95% power
+z_alpha <- qnorm(1 - alpha / 2)  
+z_beta <- qnorm(power)  
+
+treatment_effect <- 7  # Absolute treatment effect from simulation
+
+# Function to calculate sample size using only SD & treatment effect
+get_sample_size <- function(sd_treated, sd_untreated) {
+  pooled_sd <- sqrt((sd_treated^2 + sd_untreated^2) / 2)  # Pooled SD
+  N <- (2 * (z_alpha + z_beta)^2 * pooled_sd^2) / (treatment_effect^2)  # Formula
+  return(ceiling(N))  # Round up
+}
+
+# Calculate sample sizes
+N_high <- get_sample_size(sd_high_treated, sd_high_untreated)
+N_low <- get_sample_size(sd_low_treated, sd_low_untreated)
+
+# Print results with named arms
+print(paste("Sample Size - High Pragmatism (Treated vs. Untreated):", N_high))
+print(paste("Sample Size - Low Pragmatism (Treated vs. Untreated):", N_low))
+
+# Final sample size (largest of both)
+final_N <- max(N_high, N_low)
+print(paste("Final Sample Size (Largest Required):", final_N))
+```
+
+# getting samples
+
+```{r}
+set.seed(1234)
+# Load necessary libraries
+library(dplyr)
+
+# Set number of simulations
+n_sim <- 1000  
+sample_size <- 76  # Sample size per arm
+
+# Function to sample from a population
+sample_trial <- function(population, sample_size, sim_id) {
+  treated_sample <- population %>% filter(trt == 1) %>% sample_n(sample_size)
+  untreated_sample <- population %>% filter(trt == 0) %>% sample_n(sample_size)
+  
+  # Add Simulation ID column to keep trials separate
+  sampled_data <- bind_rows(treated_sample, untreated_sample)
+  sampled_data$Simulation_ID <- sim_id  
+  
+  return(sampled_data)
+}
+
+# Initialize lists to store separate RCTs
+simulated_high_rcts <- vector("list", n_sim)
+simulated_low_rcts <- vector("list", n_sim)
+
+# Monte Carlo Simulation: Generate Separate RCTs for Each Scenario
+for (i in 1:n_sim) {
+  print(paste("Generating RCT:", i))
+  
+  simulated_high_rcts[[i]] <- sample_trial(high_pragmatism_population, sample_size, i)
+  simulated_low_rcts[[i]] <- sample_trial(low_pragmatism_population, sample_size, i)
+}
+
+#imulated_high_rcts and simulated_low_rcts contain **10 separate RCTs** each.
+
+# Save the lists for later use
+save(simulated_high_rcts, file = "separate_high_pragmatism_rcts.RData")
+save(simulated_low_rcts, file = "separate_low_pragmatism_rcts.RData")
+
+ 
+
+```
+
+#validation
+
+## ---- collect_trt_effects ----------------------------------------------------
+# Returns a data frame of treatment-effect estimates (one row per RCT)
+collect_trt_effects <- function(simulated_rcts, label) {
+  do.call(rbind, lapply(seq_along(simulated_rcts), function(i) {
+    fit <- lm(Y ~ trt, data = simulated_rcts[[i]])
+    co  <- summary(fit)$coefficients["trt", c("Estimate", "Std. Error")]
+    data.frame(
+      RCT        = i,
+      Pragmatism = label,
+      estimate   = unname(co["Estimate"]),
+      std_error  = unname(co["Std. Error"]),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+## ---- run for high/low and combine -------------------------------------------
+high_effects <- collect_trt_effects(simulated_high_rcts, "High Pragmatism")
+low_effects  <- collect_trt_effects(simulated_low_rcts,  "Low Pragmatism")
+all_trt_effects <- rbind(high_effects, low_effects)
+
+## ---- quick sanity checks (optional) ------------------------------------------
+print(head(all_trt_effects))
+cat("\nN trials:", nrow(all_trt_effects), 
+    " | Mean est:", mean(all_trt_effects$estimate), 
+    " | SD est:", sd(all_trt_effects$estimate), "\n")
+
+## ---- plots -------------------------------------------------------------------
+hist(all_trt_effects$estimate, breaks = 30,
+     main = "Distribution of Treatment Effect Estimates (All Trials)",
+     xlab = "Estimated Treatment Effect")
+
+qqnorm(all_trt_effects$estimate, main = "Q-Q Plot (All Trials)")
+qqline(all_trt_effects$estimate)
+
+## --- save to file -------------------------------------------------
+# write.csv(all_trt_effects, "all_trt_effects.csv", row.names = FALSE)
+
+
+
+
+#MCAR
+
+```{r}
+set.seed(123)  
+
+# Define missingness percentages
+missing_perc_values <- c(5, 15, 25)
+
+# Function to randomly introduce MCAR missingness in an RCT
+introduce_mcar <- function(data, missing_perc) {
+  column_name <- paste0("Y_mcar_", missing_perc)  # Create column name based on missing %
+
+  # Copy original Y values
+  data[[column_name]] <- data$Y
+
+  # Apply MCAR missingness
+  missing_idx <- sample(seq_len(nrow(data)), size = round(missing_perc / 100 * nrow(data)), replace = FALSE)
+  data[missing_idx, column_name] <- NA
+
+  return(data)
+}
+
+# Apply MCAR missingness separately for each RCT
+for (i in 1:length(simulated_high_rcts)) {
+  for (perc in missing_perc_values) {
+    simulated_high_rcts[[i]] <- introduce_mcar(simulated_high_rcts[[i]], perc)
+    simulated_low_rcts[[i]] <- introduce_mcar(simulated_low_rcts[[i]], perc)
+  }
+}
+
+# Now, each RCT in `simulated_high_rcts` and `simulated_low_rcts` has MCAR missingness applied separately.
+```
+
+#MAR
+
+```{r}
+# Load necessary package
+library(dplyr)
+
+# Set seed for reproducibility
+set.seed(1234)
+
+# Define missingness percentages
+missing_perc_values <- c(5, 15, 25)
+
+# Function to introduce MAR missingness in an RCT
+generate_mar_missingness <- function(data, missing_perc) {
+  column_name <- paste0("Y_mar_", missing_perc)  # Create column name based on missing %
+
+  # Copy original Y values
+  data[[column_name]] <- data$Y
+
+  # Logistic MAR model rationale:
+# - Higher HbA1c → increased dropout due to clinical instability
+# - Treated patients → side effects or adherence issues
+# - Poverty → reduced follow-up due to socioeconomic barriers
+  
+  # Compute missingness probability using logistic regression
+  data$missing_prob <- plogis(
+    -2 + 0.04 * data$baseline_hba1c_mmol_mol + 
+         0.3  * data$trt + 
+         0.2  * data$poverty
+  )
+
+  # Determine cut-off for desired missing percentage
+  cutoff_index <- floor(nrow(data) * missing_perc / 100)
+  cutoff_value <- sort(data$missing_prob, decreasing = TRUE)[cutoff_index]
+
+  # Apply missingness
+  data[[column_name]][data$missing_prob >= cutoff_value] <- NA
+
+  # Remove temporary probability column
+  data <- data %>% select(-missing_prob)
+
+  return(data)
+}
+
+# Apply MAR missingness separately for each RCT
+for (i in 1:length(simulated_high_rcts)) {
+  for (perc in missing_perc_values) {
+    simulated_high_rcts[[i]] <- generate_mar_missingness(simulated_high_rcts[[i]], perc)
+    simulated_low_rcts[[i]] <- generate_mar_missingness(simulated_low_rcts[[i]], perc)
+  }
+}
+
+```
+
+#validation
+
+```{r}
+# Function to check missingness percentages in an RCT
+check_missingness <- function(data, rct_name) {
+  print(paste("Checking missingness in:", rct_name))
+
+  # Select only the Y variables with missing values
+  y_missing_vars <- grep("^Y_", colnames(data), value = TRUE)
+
+  # Calculate missingness percentages
+  missing_perc <- colMeans(is.na(data[, y_missing_vars])) * 100
+
+  # Print results
+  print(round(missing_perc, 2))  # Round to 2 decimal places
+}
+
+# Check missingness for each High Pragmatism RCT
+for (i in 1:length(simulated_high_rcts)) {
+  check_missingness(simulated_high_rcts[[i]], paste("High RCT", i))
+}
+
+# Check missingness for each Low Pragmatism RCT
+for (i in 1:length(simulated_low_rcts)) {
+  check_missingness(simulated_low_rcts[[i]], paste("Low RCT", i))
+}
+```
+
+# get the mean of Ys
+
+```{r}
+# Function to calculate mean of all Y variables in an RCT
+calculate_y_means <- function(data, rct_name) {
+  print(paste("Calculating means for:", rct_name))
+
+  # Select only the Y variables (including missing ones)
+  y_vars <- grep("^Y", colnames(data), value = TRUE)
+
+  # Compute means, ignoring NA values
+  y_means <- colMeans(data[, y_vars], na.rm = TRUE)
+
+  # Print results
+  print(round(y_means, 2))  # Round to 2 decimal places
+}
+
+# Calculate means for each High Pragmatism RCT
+for (i in 1:length(simulated_high_rcts)) {
+  calculate_y_means(simulated_high_rcts[[i]], paste("High RCT", i))
+}
+
+# Calculate means for each Low Pragmatism RCT
+for (i in 1:length(simulated_low_rcts)) {
+  calculate_y_means(simulated_low_rcts[[i]], paste("Low RCT", i))
+}
+```
+# MNAR
+
+
+```{r}
+
+# In this simulation, outcome Y = 6-month change in HbA1c.
+# Patients with higher Y (worse outcome / less response) are more likely to drop out.
+
+set.seed(1234)
+
+# Define the MNAR missingness percentages to simulate
+missing_perc_values <- c(5, 15, 25)
+
+# Function to apply MNAR missingness mechanism to a single RCT dataset
+introduce_mnar <- function(data, missing_perc) {
+  column_name <- paste0("Y_mnar_", missing_perc)  # New column for missing Y
+
+  data[[column_name]] <- data$Y  # Start from observed outcome
+
+  # Create a score: Higher Y (worse change) → more missing
+  data$missing_score <- data$Y + rnorm(nrow(data), mean = 0, sd = 1)  # add noise
+
+  # Identify cutoff value to reach desired percentage of missing
+  cutoff_index <- floor(nrow(data) * missing_perc / 100)
+  cutoff_value <- sort(data$missing_score, decreasing = TRUE)[cutoff_index]
+
+  # Apply MNAR missingness: those above threshold become NA
+  data[[column_name]][data$missing_score >= cutoff_value] <- NA
+
+  # Clean up temporary variable
+  data$missing_score <- NULL
+
+  return(data)
+}
+
+# Apply MNAR to all simulated RCTs
+for (i in 1:length(simulated_high_rcts)) {
+  for (perc in missing_perc_values) {
+    simulated_high_rcts[[i]] <- introduce_mnar(simulated_high_rcts[[i]], perc)
+    simulated_low_rcts[[i]]  <- introduce_mnar(simulated_low_rcts[[i]], perc)
+  }
+}
+
+```
+
+
+#MI
+
+```{r}
+# Load required package
+library(mice)
+
+# Function to perform Multiple Imputation (MI) on a given dataset
+perform_mi <- function(data, y_variable) {
+  print(paste("Imputing:", y_variable))  # Debugging message
+
+  # Select relevant variables for imputation
+  vars_for_imputation <- c(y_variable, "trt", "poverty", "baseline_hba1c_mmol_mol", 
+  "age_years", "diabetes_duration_years", 
+  "delta_healthy_eating_days_per_week", 
+  "delta_medication_taking_days_per_week")
+  
+  data_subset <- data[, vars_for_imputation, drop = FALSE]
+
+  # Convert categorical variables to factors
+  data_subset$trt <- as.factor(data_subset$trt)
+  data_subset$poverty <- as.factor(data_subset$poverty)
+
+
+  # Define imputation methods
+  methods <- rep("", ncol(data_subset))
+  names(methods) <- colnames(data_subset)
+  methods[y_variable] <- "pmm"   # Predictive Mean Matching for continuous Y variables
+  methods["trt"] <- "logreg"      # Logistic regression for binary variables
+  methods["poverty"] <- "logreg"  
+  methods["age_years"] <- "norm"  # Linear regression for age
+  methods["baseline_hba1c_mmol_mol"] <- "norm"
+methods["diabetes_duration_years"] <- "norm"
+  methods["delta_healthy_eating_days_per_week"] <- "norm"
+methods["delta_medication_taking_days_per_week"] <- "norm"
+
+
+  # Create predictor matrix
+  pred_matrix <- make.predictorMatrix(data_subset)
+  pred_matrix[y_variable, ] <- 1  # Ensure Y is imputed
+  pred_matrix[, y_variable] <- 0  # Prevent Y from predicting itself
+
+  # Run Multiple Imputation (50 imputations)
+  imputed_data <- mice(data_subset, m = 50, method = methods, predictorMatrix = pred_matrix, 
+                       seed = 1234, printFlag = FALSE)
+
+  return(imputed_data)  # Return full imputation object
+}
+
+# List of missing Y variables to impute
+y_variables <- c("Y_mar_5", "Y_mar_15", "Y_mar_25",
+  "Y_mcar_5", "Y_mcar_15", "Y_mcar_25",
+  "Y_mnar_5", "Y_mnar_15", "Y_mnar_25")
+
+# Initialize empty lists for storing imputed datasets
+imputed_high_rcts <- vector("list", length(simulated_high_rcts))
+imputed_low_rcts <- vector("list", length(simulated_low_rcts))
+
+# Perform MI separately for each RCT
+for (i in 1:length(simulated_high_rcts)) {
+  print(paste("Starting MI for High RCT:", i))
+  imputed_high_rcts[[i]] <- list()
+  
+  for (y_var in y_variables) {
+    imputed_high_rcts[[i]][[y_var]] <- perform_mi(simulated_high_rcts[[i]], y_var)
+  }
+}
+
+for (i in 1:length(simulated_low_rcts)) {
+  print(paste("Starting MI for Low RCT:", i))
+  imputed_low_rcts[[i]] <- list()
+  
+  for (y_var in y_variables) {
+    imputed_low_rcts[[i]][[y_var]] <- perform_mi(simulated_low_rcts[[i]], y_var)
+  }
+}
+
+
+# Save imputed datasets for future analysis
+save(imputed_high_rcts, file = "imputed_high_rcts.RData")
+save(imputed_low_rcts, file = "imputed_low_rcts.RData")
+
+```
+
+
+
+#R Code: Run & Pool Regression for MI Data
+
+```{r}
+# Load required packages
+library(mice)
+library(broom)
+
+# Define true treatment effect for performance metrics
+true_treatment_effect <- -7
+
+# Function to run pooled regression and compute bias, MSE, and coverage
+run_pooled_regression <- function(imputed_data, y_variable, true_effect = true_treatment_effect) {
+  print(paste("Running pooled regression for:", y_variable))
+
+  pooled_model <- with(imputed_data, lm(as.formula(paste(y_variable, "~ trt"))))
+  pooled_results <- pool(pooled_model)
+
+  summary_results <- summary(pooled_results)
+  summary_results$conf.low <- summary_results$estimate - 1.96 * summary_results$std.error
+  summary_results$conf.high <- summary_results$estimate + 1.96 * summary_results$std.error
+
+  trt_row <- summary_results[summary_results$term == "trt1", ]
+
+  estimate <- trt_row$estimate
+  se <- trt_row$std.error
+  p <- trt_row$p.value
+  lower <- trt_row$conf.low
+  upper <- trt_row$conf.high
+
+  bias <- estimate - true_effect
+  mse <- bias^2 + se^2
+  coverage <- as.numeric(lower <= true_effect & upper >= true_effect)
+
+  return(data.frame(
+    estimate = estimate,
+    std.error = se,
+    p.value = p,
+    conf.low = lower,
+    conf.high = upper,
+    bias = bias,
+    mse = mse,
+    coverage = coverage
+  ))
+}
+
+# List of missing Y variables
+y_variables <- c("Y_mar_5", "Y_mar_15", "Y_mar_25",
+  "Y_mcar_5", "Y_mcar_15", "Y_mcar_25",
+  "Y_mnar_5", "Y_mnar_15", "Y_mnar_25")
+
+# Initialize results storage
+pooled_results_high <- vector("list", length(imputed_high_rcts))
+pooled_results_low <- vector("list", length(imputed_low_rcts))
+
+# High Pragmatism RCTs
+for (i in seq_along(imputed_high_rcts)) {
+  print(paste("Processing High RCT", i))
+  pooled_results_high[[i]] <- list()
+
+  for (y_var in y_variables) {
+    if (!is.null(imputed_high_rcts[[i]][[y_var]])) {
+      pooled_results_high[[i]][[y_var]] <- run_pooled_regression(imputed_high_rcts[[i]][[y_var]], y_var)
+    }
+  }
+}
+
+# Low Pragmatism RCTs
+for (i in seq_along(imputed_low_rcts)) {
+  print(paste("Processing Low RCT", i))
+  pooled_results_low[[i]] <- list()
+
+  for (y_var in y_variables) {
+    if (!is.null(imputed_low_rcts[[i]][[y_var]])) {
+      pooled_results_low[[i]][[y_var]] <- run_pooled_regression(imputed_low_rcts[[i]][[y_var]], y_var)
+    }
+  }
+}
+
+# Save final lists
+save(pooled_results_high, file = "pooled_results_high.RData")
+save(pooled_results_low, file = "pooled_results_low.RData")
+
+
+```
+
+# pool the treatment effect (imputed) across all  RCTs
+```{r}
+# Function to compute pooled summary metrics across  RCTs
+compute_summary_metrics <- function(pooled_results_list, y_variable) {
+  results <- lapply(pooled_results_list, function(rct) rct[[y_variable]])
+  results <- results[!sapply(results, is.null)]
+  results_df <- do.call(rbind, results)
+# Keep Rubin’s averages
+  out <- colMeans(results_df, na.rm = TRUE)
+  emp_se <- sd(results_df$estimate, na.rm = TRUE)##########
+  emp_mse <- mean((results_df$estimate - true_treatment_effect)^2, na.rm = TRUE)##########
+  out <- c(out, emp.se = emp_se, emp.mse = emp_mse)
+
+  return(out)
+  
+  }
+
+# Variables to pool over
+y_variables <- c("Y_mar_5", "Y_mar_15", "Y_mar_25",
+  "Y_mcar_5", "Y_mcar_15", "Y_mcar_25",
+  "Y_mnar_5", "Y_mnar_15", "Y_mnar_25")
+
+# Create summary lists
+summary_metrics_high <- list()
+summary_metrics_low <- list()
+
+
+
+# Loop over variables and pool across  RCTs
+for (y_var in y_variables) {
+  summary_metrics_high[[y_var]] <- compute_summary_metrics(pooled_results_high, y_var)
+  summary_metrics_low[[y_var]] <- compute_summary_metrics(pooled_results_low, y_var)
+}
+
+
+
+# --- Build MI Summary for High Pragmatism ---
+results_mi_high <- do.call(rbind, lapply(names(summary_metrics_high), function(y_var) {
+  row <- summary_metrics_high[[y_var]]
+  data.frame(
+    y_variable = y_var,
+    estimate   = round(as.numeric(row["estimate"]), 2),
+    se         = round(as.numeric(row["std.error"]), 2),
+    emp_se     = round(as.numeric(row["emp.se"]), 2),###############
+    bias       = round(as.numeric(row["bias"]), 2),
+    mse        = round(as.numeric(row["mse"]), 2),
+    emp_mse    = round(as.numeric(row["emp.mse"]), 2),
+    coverage   = round(as.numeric(row["coverage"]), 2),
+        p_value    = round(as.numeric(row["p.value"]), 4),
+    method     = "MI",
+    pragmatism = "High"
+  )
+}))
+
+# --- Build MI Summary for Low Pragmatism ---
+results_mi_low <- do.call(rbind, lapply(names(summary_metrics_low), function(y_var) {
+  row <- summary_metrics_low[[y_var]]
+  data.frame(
+    y_variable = y_var,
+    estimate   = round(as.numeric(row["estimate"]), 2),
+    se         = round(as.numeric(row["std.error"]), 2),
+    emp_se     = round(as.numeric(row["emp.se"]), 2),##########
+    bias       = round(as.numeric(row["bias"]), 2),
+    mse        = round(as.numeric(row["mse"]), 2),
+    emp_mse    = round(as.numeric(row["emp.mse"]), 2),
+    coverage   = round(as.numeric(row["coverage"]), 2),
+        p_value    = round(as.numeric(row["p.value"]), 4),
+    method     = "MI",
+    pragmatism = "Low"
+  )
+}))
+
+
+# Display the results
+print("Summary Metrics for High Pragmatism RCTs:")
+print(summary_metrics_high)
+
+print("Summary Metrics for Low Pragmatism RCTs:")
+print(summary_metrics_low)
+
+
+# Convert trt to factor explicitly
+imp_data <- imputed_high_rcts[[1]][["Y_mar_5"]]
+imp_data$data$trt <- as.factor(imp_data$data$trt)
+
+# Rerun pooled regression
+pooled_model <- with(imp_data, lm(Y_mar_5 ~ trt))
+pooled_summary <- summary(pool(pooled_model))
+
+# View all terms to check
+print(pooled_summary$term)
+```
+
+#MLE via LMM for All Scenarios
+Calculates post-treatment HbA1c by adding baseline + change (Y_*)
+
+Reshapes each RCT to long format (pre/post rows per patient)
+
+Fits a Linear Mixed Model (LMM) using lmer() to estimate the treatment effect over time
+
+Extracts treatment × time interaction effect for all 9 missingness variables
+
+Repeats the above for each RCT in both high and low pragmatism groups
+
+Saves results in nested lists: mle_results_high and mle_results_low
+
+```{r}
+library(lme4)
+library(dplyr)
+library(tidyr)
+
+# Define list of outcome variables with missingness
+y_variables <- c(
+  "Y_mar_5", "Y_mar_15", "Y_mar_25",
+  "Y_mcar_5", "Y_mcar_15", "Y_mcar_25",
+  "Y_mnar_5", "Y_mnar_15", "Y_mnar_25"
+)
+
+# Function to reshape one RCT to long format for MLE
+reshape_to_long <- function(data, baseline_var, outcome_var) {
+  data <- data %>%
+    mutate(
+      post_hba1c = .data[[baseline_var]] + .data[[outcome_var]],
+      patient_id = row_number()
+    )
+
+  long_data <- data %>%
+    select(patient_id, trt, !!baseline_var, post_hba1c) %>%
+    rename(baseline = !!baseline_var) %>%
+    pivot_longer(cols = c(baseline, post_hba1c),
+                 names_to = "time", values_to = "hba1c_value") %>%
+    mutate(time = ifelse(time == "baseline", 0, 1))
+long_data$trt <- factor(long_data$trt, levels = c(0, 1)) 
+  return(long_data)
+}
+
+# Function to fit LMM and extract treatment*time effect
+run_lmm_mle <- function(long_data) {
+  model <- tryCatch(
+    lmer(hba1c_value ~ time * trt + (1 | patient_id), data = long_data),
+    error = function(e) return(NULL)
+  )
+  if (!is.null(model)) {
+    coefs <- summary(model)$coefficients
+    if ("time:trt1" %in% rownames(coefs)) {
+      est <- coefs["time:trt1", "Estimate"]
+      se <- coefs["time:trt1", "Std. Error"]
+      z_score <- est / se
+p_val <- 2 * (1 - pnorm(abs(z_score)))
+      ci_low <- est - 1.96 * se
+      ci_high <- est + 1.96 * se
+      bias <- est - (-7)
+      mse <- bias^2 + se^2
+      coverage <- as.numeric(ci_low <= -7 & ci_high >= -7)
+      return(data.frame(estimate = est, std.error = se,
+                                                p.value = p_val,
+                        conf.low = ci_low, conf.high = ci_high,
+                        bias = bias, mse = mse, coverage = coverage))
+    }
+  }
+  return(NULL)
+}
+
+# Function to run across all RCTs for one group
+run_mle_for_group <- function(simulated_rcts, baseline_var) {
+  mle_results <- vector("list", length(simulated_rcts))
+  for (i in seq_along(simulated_rcts)) {
+    rct <- simulated_rcts[[i]]
+    mle_results[[i]] <- list()
+    for (y_var in y_variables) {
+      if (y_var %in% colnames(rct)) {
+        long_data <- reshape_to_long(rct, baseline_var, y_var)
+        mle_results[[i]][[y_var]] <- run_lmm_mle(long_data)
+      }
+    }
+  }
+  return(mle_results)
+}
+
+# Run MLE on both high and low pragmatism RCTs
+mle_results_high <- run_mle_for_group(simulated_high_rcts, "baseline_hba1c_mmol_mol")
+mle_results_low <- run_mle_for_group(simulated_low_rcts, "baseline_hba1c_mmol_mol")
+
+# Save results
+save(mle_results_high, file = "mle_results_high.RData")
+save(mle_results_low, file = "mle_results_low.RData")
+
+
+
+```
+
+#Pool MLE Results Across all RCTs (per Y variable)
+
+Aggregates results from all RCTs for each Y variable (e.g., Y_mar_5)
+
+Computes average estimate, standard error, bias, MSE, and coverage
+
+Produces a summary of model performance under each missingness scenario
+
+Saves final pooled results into summary_mle_high and summary_mle_low
+```{r}
+# Function to compute summary metrics across RCTs for each Y variable
+pool_mle_results <- function(mle_result_list, y_vars) {
+  summary_metrics <- list()
+  
+  for (y_var in y_vars) {
+    results <- lapply(mle_result_list, function(rct) rct[[y_var]])
+    results <- results[!sapply(results, is.null)]
+    if (length(results) > 0) {
+      df <- do.call(rbind, results)
+out <- colMeans(df, na.rm = TRUE)
+
+# Add empirical SE = SD of estimates across RCTs
+emp_se <- sd(df$estimate, na.rm = TRUE)##########
+emp_mse <- mean((df$estimate - (-7))^2, na.rm = TRUE)  # true effect = -7
+out <- c(out, emp.se = emp_se , emp.mse = emp_mse)
+
+summary_metrics[[y_var]] <- out
+      
+          }
+  }
+  
+  return(summary_metrics)
+}
+
+# Pool results for high and low pragmatism
+summary_mle_high <- pool_mle_results(mle_results_high, y_variables)
+summary_mle_low <- pool_mle_results(mle_results_low, y_variables)
+
+
+
+# Convert summary_mle_high to data frame
+results_mle_high <- do.call(rbind, lapply(names(summary_mle_high), function(y_var) {
+  row <- summary_mle_high[[y_var]]
+  data.frame(
+    y_variable = y_var,
+    estimate   = round(row["estimate"], 2),
+    se         = round(row["std.error"], 2),
+    emp_se     = round(row["emp.se"], 2),      ##########
+    p_value    = round(row["p.value"], 4),
+    bias       = round(row["bias"], 2),
+    mse        = round(row["mse"], 2),
+    emp_mse    = round(as.numeric(row["emp.mse"]), 2),
+    coverage   = round(row["coverage"], 2),
+    method     = "MLE",
+    pragmatism = "High"
+  )
+}))
+
+# Convert summary_mle_low to data frame
+results_mle_low <- do.call(rbind, lapply(names(summary_mle_low), function(y_var) {
+  row <- summary_mle_low[[y_var]]
+  data.frame(
+    y_variable = y_var,
+    estimate   = round(row["estimate"], 2),
+    se         = round(row["std.error"], 2),
+    emp_se     = round(row["emp.se"], 2),      #######
+    p_value    = round(row["p.value"], 4),
+    bias       = round(row["bias"], 2),
+    mse        = round(row["mse"], 2),
+    emp_mse    = round(as.numeric(row["emp.mse"]), 2),
+    coverage   = round(row["coverage"], 2),
+    method     = "MLE",
+    pragmatism = "Low"
+  )
+}))
+
+# Print results
+print("MLE Summary Metrics for High Pragmatism RCTs:")
+print(summary_mle_high)
+
+print("MLE Summary Metrics for Low Pragmatism RCTs:")
+print(summary_mle_low)
+
+# Optional: Save to file
+save(summary_mle_high, file = "summary_mle_high.RData")
+save(summary_mle_low, file = "summary_mle_low.RData")
+
+
+```
+
+
+
+#full data analysis
+
+```{r}
+# Load required package
+library(broom)
+library(dplyr)
+library(magrittr)
+
+true_trt_effect <- -7  
+
+# Function to run regression & extract treatment effect with 95% CI
+run_full_analysis <- function(data, y_variable) {
+  print(paste("Running Full Data Analysis for:", y_variable))
+  
+  # Run regression model
+  model <- lm(as.formula(paste(y_variable, "~ trt")), data = data)
+  
+  # Extract summary
+  summary_results <- tidy(model)
+  ci_results <- confint(model)  # 95% CI
+  
+  # Extract treatment effect
+  trt_effect <- summary_results[summary_results$term == "trt", c("estimate", "std.error", "p.value")]
+  trt_effect$CI_lower <- ci_results["trt", 1]
+  trt_effect$CI_upper <- ci_results["trt", 2]
+  
+  return(trt_effect)
+}
+
+# Initialize result lists
+full_results_high <- list()
+full_results_low <- list()
+
+# Run regression for High and Low Pragmatism
+for (i in 1:1000) {
+  print(paste("Processing Full Data Analysis for High RCT", i))
+  full_results_high[[i]] <- run_full_analysis(simulated_high_rcts[[i]], "Y")
+  
+  print(paste("Processing Full Data Analysis for Low RCT", i))
+  full_results_low[[i]] <- run_full_analysis(simulated_low_rcts[[i]], "Y")
+}
+
+# Save individual results
+save(full_results_high, file = "full_results_high.RData")
+save(full_results_low, file = "full_results_low.RData")
+
+# Optional: Combine into a summary table (can remove if not needed)
+trt_effects_high <- do.call(rbind, full_results_high) %>% as.data.frame()
+trt_effects_low <- do.call(rbind, full_results_low) %>% as.data.frame()
+trt_effects_high$Pragmatism <- "High"
+trt_effects_low$Pragmatism <- "Low"
+trt_effects_summary <- rbind(trt_effects_high, trt_effects_low)
+print(trt_effects_summary)
+
+# Pooled analysis with Bias, MSE, and Coverage
+compute_pooled_results <- function(results_list, true_trt_effect) {
+  results_df <- do.call(rbind, results_list)
+  
+  # Pooled estimate and SE
+  pooled_estimate <- mean(results_df$estimate)
+  
+  # average within-trial SE
+pooled_se <- mean(results_df$std.error, na.rm = TRUE)
+
+  CI_lower <- pooled_estimate - 1.96 * pooled_se
+  CI_upper <- pooled_estimate + 1.96 * pooled_se
+  
+  # Bias, MSE, Coverage
+  bias <- pooled_estimate - true_trt_effect
+  mse <- mean((results_df$estimate - true_trt_effect)^2)
+  coverage <- mean(results_df$CI_lower <= true_trt_effect & results_df$CI_upper >= true_trt_effect)
+  
+  return(data.frame(
+  pooled_estimate = round(pooled_estimate, 3),
+  pooled_se = round(pooled_se, 3),
+  bias = round(bias, 3),
+  mse = round(mse, 3),
+  coverage = round(coverage, 3)
+  ))
+}
+
+# Run pooled analysis
+pooled_high_results <- compute_pooled_results(full_results_high, true_trt_effect)
+pooled_low_results  <- compute_pooled_results(full_results_low,  true_trt_effect)
+
+# Compute average p-values across the 1000 full regressions
+avg_pval_high <- round(mean(sapply(full_results_high, function(x) x$p.value)), 4)
+avg_pval_low  <- round(mean(sapply(full_results_low,  function(x) x$p.value)), 4)
+
+# Display final output
+print("Pooled Full Data Results - High Pragmatism")
+print(format(pooled_high_results, digits = 3, nsmall = 3))
+
+print("Pooled Full Data Results - Low Pragmatism")
+print(pooled_low_results)
+print(format(pooled_low_results, digits = 3, nsmall = 3))
+
+
+# Save to files
+save(pooled_high_results, file = "pooled_high_results.RData")
+save(pooled_low_results, file = "pooled_low_results.RData")
+write.csv(pooled_high_results, "pooled_full_high_summary.csv", row.names = FALSE)
+write.csv(pooled_low_results, "pooled_full_low_summary.csv", row.names = FALSE)
+
+
+# Create results data frames
+results_full_high <- data.frame(
+  y_variable = "Full",
+  estimate   = pooled_high_results$pooled_estimate,
+  se         = pooled_high_results$pooled_se,
+  bias       = pooled_high_results$bias,
+  mse        = pooled_high_results$mse,
+  coverage   = pooled_high_results$coverage,
+    p_value    = avg_pval_high,          
+  method     = "Full",
+  pragmatism = "High"
+)
+
+results_full_low <- data.frame(
+  y_variable = "Full",
+  estimate   = pooled_low_results$pooled_estimate,
+  se         = pooled_low_results$pooled_se,
+  bias       = pooled_low_results$bias,
+  mse        = pooled_low_results$mse,
+  coverage   = pooled_low_results$coverage,
+    p_value    = avg_pval_high,          
+  method     = "Full",
+  pragmatism = "Low"
+)
+
+```
+
+
+
+
+
+#check
+
+```{r}
+for (i in 1:10) {
+  print(paste("Full Data Regression Results for High RCT", i))
+  print(full_results_high[[i]])
+}
+
+for (i in 1:10) {
+  print(paste("Full Data Regression Results for Low RCT", i))
+  print(full_results_low[[i]])
+}
+```
+
+
+#CCA new 
+
+```{r}
+# Load necessary packages
+library(dplyr)
+library(broom)
+library(stringr)
+
+
+# Define all outcome variables (including MNAR)
+y_variables <- c(
+  "Y_mar_5", "Y_mar_15", "Y_mar_25", 
+  "Y_mcar_5", "Y_mcar_15", "Y_mcar_25",
+  "Y_mnar_5", "Y_mnar_15", "Y_mnar_25"
+)
+
+true_trt_effect <- -7
+
+# --- Step 1: CCA regression function ---
+run_cca_regression <- function(data, y_variable) {
+  cca_data <- data %>% filter(!is.na(.data[[y_variable]]))
+  model <- lm(as.formula(paste(y_variable, "~ trt")), data = cca_data)
+  trt_effect <- tidy(model) %>% filter(term == "trt")
+  trt_effect <- trt_effect %>%
+    mutate(
+      conf.low = estimate - 1.96 * std.error,
+      conf.high = estimate + 1.96 * std.error
+    )
+  return(trt_effect)
+}
+
+# --- Step 2: Run CCA across all RCTs ---
+
+cca_results_high <- vector("list", length(simulated_high_rcts))
+cca_results_low <- vector("list", length(simulated_low_rcts))
+
+# High Pragmatism
+for (i in seq_along(simulated_high_rcts)) {
+  cca_results_high[[i]] <- list()
+  for (y_var in y_variables) {
+    if (y_var %in% colnames(simulated_high_rcts[[i]])) {
+      cca_results_high[[i]][[y_var]] <- run_cca_regression(simulated_high_rcts[[i]], y_var)
+    }
+  }
+}
+
+# Low Pragmatism
+for (i in seq_along(simulated_low_rcts)) {
+  cca_results_low[[i]] <- list()
+  for (y_var in y_variables) {
+    if (y_var %in% colnames(simulated_low_rcts[[i]])) {
+      cca_results_low[[i]][[y_var]] <- run_cca_regression(simulated_low_rcts[[i]], y_var)
+    }
+  }
+}
+
+# --- Step 3: Function to pool CCA results across RCTs 
+compute_pooled_cca_results <- function(results_list, y_var, true_trt_effect) {
+  valid_results <- lapply(results_list, function(rct) rct[[y_var]])
+  valid_results <- valid_results[!sapply(valid_results, is.null)]
+  
+  if (length(valid_results) == 0) {
+    return(data.frame(
+      y_variable = y_var,
+      pooled_estimate = NA,
+      pooled_se = NA,
+      emp_se = NA,
+      CI_lower = NA,
+      CI_upper = NA,
+      bias = NA,
+      mse = NA,
+      coverage = NA,
+      p_value = NA
+    ))
+  }
+  
+  valid_results <- do.call(rbind, valid_results)
+  
+  pooled_estimate <- mean(valid_results$estimate, na.rm = TRUE)
+  pooled_se <- mean(valid_results$std.error, na.rm = TRUE)   # model-based SE
+  emp_se <- sd(valid_results$estimate, na.rm = TRUE)         # empirical SE
+  avg_pval <- mean(valid_results$p.value, na.rm = TRUE)
+  
+  CI_lower <- pooled_estimate - 1.96 * pooled_se
+  CI_upper <- pooled_estimate + 1.96 * pooled_se
+  bias <- pooled_estimate - true_trt_effect
+  
+  # two different mse calculations
+  mse <- mean((valid_results$estimate - true_trt_effect)^2, na.rm = TRUE)  # standard definition
+  theoretical_mse <- bias^2 + emp_se^2   # NEW: model-based theoretical MSE
+
+
+  coverage <- mean((valid_results$conf.low <= true_trt_effect) & 
+                   (valid_results$conf.high >= true_trt_effect), na.rm = TRUE)
+  
+  return(data.frame(
+    y_variable = y_var,
+    pooled_estimate = round(pooled_estimate, 2),
+    pooled_se = round(pooled_se, 2),
+    emp_se = round(emp_se, 2),
+    CI_lower = round(CI_lower, 2),
+    CI_upper = round(CI_upper, 2),
+    bias = round(bias, 2),
+    mse = round(mse, 2),
+      theoretical_mse = round(theoretical_mse, 2),  
+    coverage = round(coverage, 2),
+    p_value = round(avg_pval, 4)
+  ))
+}
+
+
+# --- Step 4: Loop through Y variables and pool results ---
+
+pooled_cca_high <- list()
+pooled_cca_low <- list()
+
+for (y_var in y_variables) {
+  message("Pooling HIGH pragmatism: ", y_var)
+  pooled_cca_high[[y_var]] <- compute_pooled_cca_results(cca_results_high, y_var, true_trt_effect)
+
+  message("Pooling LOW pragmatism: ", y_var)
+  pooled_cca_low[[y_var]] <- compute_pooled_cca_results(cca_results_low, y_var, true_trt_effect)
+}
+
+# --- Step 5: Combine into data frames ---
+
+pooled_cca_high_df <- do.call(rbind, pooled_cca_high)
+pooled_cca_low_df <- do.call(rbind, pooled_cca_low)
+
+# Add labels and standardize column names
+results_cca_high <- pooled_cca_high_df %>%
+  rename(estimate = pooled_estimate, se = pooled_se) %>%
+  mutate(method = "CCA", Trial_Design  = "More Pragmatic Trial")
+
+results_cca_low <- pooled_cca_low_df %>%
+  rename(estimate = pooled_estimate, se = pooled_se) %>%
+  mutate(method = "CCA", Trial_Design  = "More Explanatory Trial")
+
+
+
+
+# (Optional) Combine high and low for future ordering or summary
+combined_results <- bind_rows(results_cca_high, results_cca_low)
+
+# If extracting mechanism for ordering later:
+combined_results <- combined_results %>%
+  mutate(mechanism = case_when(
+    grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+    grepl("mar", y_variable, ignore.case = TRUE) ~ "MAR",
+    grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(mechanism = factor(mechanism, levels = c("MCAR", "MAR", "MNAR")))
+
+
+
+# --- Step 6: Save and/or print results ---
+
+print("===== MORE PRAGMATIC TRIAL RESULTS (INCLUDING MNAR) =====")
+print(results_cca_high)
+
+print("===== MORE EXPLANATORY TRIAL RESULTS (INCLUDING MNAR) =====")
+print(results_cca_low)
+
+write.csv(results_cca_high, "pooled_cca_high_summary.csv", row.names = FALSE)
+write.csv(results_cca_low, "pooled_cca_low_summary.csv", row.names = FALSE)
+
+save(results_cca_high, file = "pooled_cca_high_summary.RData")
+save(results_cca_low,  file = "pooled_cca_low_summary.RData")
+
+
+
+
+# Combine high and low results
+combined_results <- bind_rows(results_cca_high, results_cca_low)
+
+# Extract mechanism and missing percentage
+combined_results <- combined_results %>%
+  mutate(
+    mechanism = case_when(
+      str_detect(y_variable, "mcar") ~ "MCAR",
+      str_detect(y_variable, "mar") ~ "MAR",
+      str_detect(y_variable, "mnar") ~ "MNAR",
+      TRUE ~ "Other"
+    ),
+    missing_pct = as.numeric(str_extract(y_variable, "\\d+"))
+  )
+
+# Define custom order for mechanism and trial design
+combined_results <- combined_results %>%
+  mutate(
+    mechanism = factor(mechanism, levels = c("MCAR", "MAR", "MNAR")),
+    Trial_Design = factor(Trial_Design, levels = c("More Pragmatic Trial", "More Explanatory Trial"))
+  )
+
+# Arrange (sort) by trial design, mechanism, and missing percentage
+combined_results <- combined_results %>%
+  arrange(Trial_Design, mechanism, missing_pct)
+
+# Optional: View the reordered table
+print(combined_results)
+
+# Optional: Save the reordered table
+write.csv(combined_results, "combined_results_ordered.csv", row.names = FALSE)
+
+```
+
+
+
+# 4.2
+```{r}
+# Load required packages
+library(dplyr)
+library(tibble)
+
+# Function to summarize characteristics by trt (0 and 1)
+summarize_one_rct <- function(df) {
+  df %>%
+    group_by(trt) %>%
+    summarise(
+      Age_mean = mean(age_years, na.rm = TRUE),
+      Age_sd = sd(age_years, na.rm = TRUE),
+      BMI_mean = mean(bmi_kg_m2, na.rm = TRUE),
+      BMI_sd = sd(bmi_kg_m2, na.rm = TRUE),
+      HbA1c_mean = mean(baseline_hba1c_mmol_mol, na.rm = TRUE),
+      HbA1c_sd = sd(baseline_hba1c_mmol_mol, na.rm = TRUE),
+      Duration_mean = mean(diabetes_duration_years, na.rm = TRUE),
+      Duration_sd = sd(diabetes_duration_years, na.rm = TRUE),
+      Gender_percent = mean(gender == 1, na.rm = TRUE) * 100,
+      Poverty_percent = mean(poverty == 1, na.rm = TRUE) * 100,
+      Education_percent = mean(education == 1, na.rm = TRUE) * 100,
+      Insulin_percent = mean(insulin_use == 1, na.rm = TRUE) * 100,
+      .groups = 'drop'
+    )
+}
+
+# Function to apply to all 1000 RCTs and average across them
+summarize_all_rcts <- function(sim_list) {
+  all_summaries <- lapply(sim_list, summarize_one_rct)
+  combined <- bind_rows(all_summaries, .id = "simulation")
+  
+  # Group by trt and compute mean across simulations
+  pooled <- combined %>%
+    group_by(trt) %>%
+    summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+  
+  # Format table
+  tibble(
+    Variable = c(
+      "Age (years)", "BMI (kg/m²)", "Baseline HbA1c (mmol/mol)",
+      "Diabetes Duration (years)", "Gender (Male = 1)",
+      "Poverty (1 = Yes)", "Education (≤ Secondary = 1)",
+      "Insulin Use (1 = Yes)"
+    ),
+    `Trt = 0` = c(
+      sprintf("%.1f ± %.1f", pooled$Age_mean[pooled$trt == 0], pooled$Age_sd[pooled$trt == 0]),
+      sprintf("%.1f ± %.1f", pooled$BMI_mean[pooled$trt == 0], pooled$BMI_sd[pooled$trt == 0]),
+      sprintf("%.1f ± %.1f", pooled$HbA1c_mean[pooled$trt == 0], pooled$HbA1c_sd[pooled$trt == 0]),
+      sprintf("%.1f ± %.1f", pooled$Duration_mean[pooled$trt == 0], pooled$Duration_sd[pooled$trt == 0]),
+      sprintf("%.1f%%", pooled$Gender_percent[pooled$trt == 0]),
+      sprintf("%.1f%%", pooled$Poverty_percent[pooled$trt == 0]),
+      sprintf("%.1f%%", pooled$Education_percent[pooled$trt == 0]),
+      sprintf("%.1f%%", pooled$Insulin_percent[pooled$trt == 0])
+    ),
+    `Trt = 1` = c(
+      sprintf("%.1f ± %.1f", pooled$Age_mean[pooled$trt == 1], pooled$Age_sd[pooled$trt == 1]),
+      sprintf("%.1f ± %.1f", pooled$BMI_mean[pooled$trt == 1], pooled$BMI_sd[pooled$trt == 1]),
+      sprintf("%.1f ± %.1f", pooled$HbA1c_mean[pooled$trt == 1], pooled$HbA1c_sd[pooled$trt == 1]),
+      sprintf("%.1f ± %.1f", pooled$Duration_mean[pooled$trt == 1], pooled$Duration_sd[pooled$trt == 1]),
+      sprintf("%.1f%%", pooled$Gender_percent[pooled$trt == 1]),
+      sprintf("%.1f%%", pooled$Poverty_percent[pooled$trt == 1]),
+      sprintf("%.1f%%", pooled$Education_percent[pooled$trt == 1]),
+      sprintf("%.1f%%", pooled$Insulin_percent[pooled$trt == 1])
+    )
+  )
+}
+
+# Run for both high and low pragmatism
+summary_high_pooled <- summarize_all_rcts(simulated_high_rcts)
+summary_low_pooled <- summarize_all_rcts(simulated_low_rcts)
+
+# Print the tables
+print("Pooled Summary: High Pragmatism RCTs")
+print(summary_high_pooled)
+
+print("Pooled Summary: Low Pragmatism RCTs")
+print(summary_low_pooled)
+
+
+# Combine the two tables into one by column
+combined_summary <- summary_low_pooled %>%
+  rename(`Low Trt = 0` = `Trt = 0`,
+         `Low Trt = 1` = `Trt = 1`) %>%
+  left_join(
+    summary_high_pooled %>%
+      rename(`High Trt = 0` = `Trt = 0`,
+             `High Trt = 1` = `Trt = 1`),
+    by = "Variable"
+  )
+
+# View the final table
+print(combined_summary)
+```
+
+```{r}
+
+
+library(ggplot2)
+
+population$individual_effect <- population$y1 - population$y0
+
+ggplot(population, aes(x = individual_effect)) +
+  geom_histogram(bins = 40, fill = "#69b3a2", color = "white") +
+  labs(title = "Histogram of Individual Treatment Effects",
+       x = "Treatment Effect (Y₁ − Y₀)",
+       y = "Count") +
+  theme_minimal()
+
+# Save plot as PNG file
+ggsave("Figure_4_1.png", plot = last_plot(), width = 7, height = 5, dpi = 300)
+
+
+
+# Load required package
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Assuming  simulated population includes y0 and y1
+df <- population %>%
+  select(y0, y1)
+
+# Convert to long format for plotting
+df_long <- pivot_longer(df, cols = c(y0, y1), names_to = "Outcome", values_to = "HbA1c")
+
+# Plot density distributions
+ggplot(df_long, aes(x = HbA1c, fill = Outcome)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Density Plot of Simulated Potential Outcomes (Y₀ vs. Y₁)",
+       x = "HbA1c Outcome",
+       y = "Density") +
+  theme_minimal() +
+  scale_fill_manual(values = c("y0" = "#1f77b4", "y1" = "#ff7f0e"))
+
+# Save the plot to file
+ggsave("Figure_4_2_Potential_Outcomes_Density.png", width = 7, height = 5, dpi = 300)
+
+
+```
+
+# 4.3
+#revised figure 4.3
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Relabel pragmatism as Trial Design
+all_trt_effects <- all_trt_effects %>%
+  mutate(Trial_Design = ifelse(Pragmatism == "High", "More Pragmatic Trial", "More Explanatory Trial"))
+
+# Filter: More Pragmatic Trial only
+fig_4_3_pragmatic <- ggplot(filter(all_trt_effects, Trial_Design == "More Pragmatic Trial"), 
+                            aes(x = RCT, y = estimate)) +
+  geom_point(color = "#1f77b4", alpha = 0.5, size = 1) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), alpha = 0.3, width = 0.1) +
+  geom_hline(yintercept = -7, linetype = "dashed", color = "gray40") +
+  labs(
+    title = "Treatment Effect Estimates (More Pragmatic Trial)",
+    x = "Simulated RCT (Index)",
+    y = "Treatment Effect Estimate"
+  ) +
+  theme_minimal()
+
+# Filter: More Explanatory Trial only
+fig_4_3_explanatory <- ggplot(filter(all_trt_effects, Trial_Design == "More Explanatory Trial"), 
+                              aes(x = RCT, y = estimate)) +
+  geom_point(color = "#d95f02", alpha = 0.5, size = 1) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), alpha = 0.3, width = 0.1) +
+  geom_hline(yintercept = -7, linetype = "dashed", color = "gray40") +
+  labs(
+    title = "Treatment Effect Estimates (More Explanatory Trial)",
+    x = "Simulated RCT (Index)",
+    y = "Treatment Effect Estimate"
+  ) +
+  theme_minimal()
+
+# Save both plots
+ggsave("Figure_4.3_More_Pragmatic_Trial.png", plot = fig_4_3_pragmatic, width = 8, height = 5, dpi = 300)
+ggsave("Figure_4.4_More_Explanatory_Trial.png", plot = fig_4_4_explanatory, width = 8, height = 5, dpi = 300)
+
+```
+
+
+```{r}
+
+# Load required libraries
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+
+# Create data frame with Bias and root MSE
+bias_mse_df <- tibble(
+  Pragmatism = c("High", "Low"),
+  Bias = c(pooled_high_results$bias, pooled_low_results$bias),
+  Root_MSE = c(sqrt(pooled_high_results$mse), sqrt(pooled_low_results$mse))
+)
+
+# Relabel Pragmatism to Trial Design
+bias_mse_df <- bias_mse_df %>%
+  mutate(Trial_Design = ifelse(Pragmatism == "High", "More Pragmatic Trial", "More Explanatory Trial")) %>%
+  select(-Pragmatism)  # Drop old column
+
+# Convert to long format
+bias_mse_long <- bias_mse_df %>%
+  pivot_longer(cols = c(Bias, Root_MSE), names_to = "Metric", values_to = "Value")
+
+# Plot with value labels
+fig_4_5 <- ggplot(bias_mse_long, aes(x = Trial_Design, y = Value, fill = Metric)) +
+  geom_col(position = position_dodge(width = 0.9), width = 0.7) +
+  geom_text(aes(label = round(Value, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, size = 3.5) +
+  labs(
+    title = "Comparison of Bias and Root MSE from Full Data (1000 Simulations)",
+    y = "Value", x = "Trial Design"
+  ) +
+  scale_fill_manual(values = c("#1b9e77", "#d95f02")) +
+  theme_minimal()
+
+# Show the plot
+print(fig_4_5)
+
+# Save as PNG
+ggsave("Figure_4_5_RootMSE.png", plot = fig_4_4, width = 7, height = 5, dpi = 300)
+
+
+
+```
+
+
+
+# 4.5.1
+```{r}
+# Load required packages
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Add Pragmatism column to each dataframe
+pooled_cca_high_df$Pragmatism <- "More Pragmatic Trial"
+pooled_cca_low_df$Pragmatism <- "More Explanatory Trial"
+
+# Combine and prepare data
+combined_bias_df <- bind_rows(pooled_cca_high_df, pooled_cca_low_df) %>%
+  select(y_variable, bias, Pragmatism) %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mar",  y_variable) ~ "MAR",
+      grepl("mcar", y_variable) ~ "MCAR",
+      grepl("mnar", y_variable) ~ "MNAR"
+    ),
+    missingness = case_when(
+      grepl("_5",  y_variable) ~ "5%",
+      grepl("_15", y_variable) ~ "15%",
+      grepl("_25", y_variable) ~ "25%"
+    ),
+    # set factor levels for order
+    missingness = factor(missingness, levels = c("5%", "15%", "25%")),
+    mechanism   = factor(mechanism,   levels = c("MCAR", "MAR", "MNAR")),
+    Pragmatism  = factor(Pragmatism,  levels = c("More Pragmatic Trial", "More Explanatory Trial"))
+  ) %>%
+  mutate(bias_label = sprintf("%.2f", bias))
+
+
+# Create the plot with labels
+ggplot(combined_bias_df, aes(x = missingness, y = bias, fill = Pragmatism)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = bias_label), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.3, size = 2.8) +
+  facet_wrap(~mechanism) +
+  labs(title = " Bias of Treatment Effect Estimates Across Missingness Levels (CCA)",
+       x = "Missingness Percentage",
+       y = "Bias ") +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        legend.title = element_blank())
+
+# Save the plot
+ggsave("Figure_4.5_Bias_Faceted_With_Labels.png", width = 9, height = 5.5, dpi = 300)
+
+```
+#extra
+
+```{r}
+# Add updated Trial_Design column to each dataframe
+pooled_cca_high_df$Trial_Design <- "More Pragmatic Trial"
+pooled_cca_low_df$Trial_Design <- "More Explanatory Trial"
+
+# Combine and prepare data
+combined_bias_df <- bind_rows(pooled_cca_high_df, pooled_cca_low_df) %>%
+  select(y_variable, bias, Trial_Design) %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mcar", y_variable) ~ "MCAR",
+      grepl("mar",  y_variable) ~ "MAR",
+      grepl("mnar", y_variable) ~ "MNAR"
+    ),
+    missingness = case_when(
+      grepl("_5",  y_variable) ~ "5%",
+      grepl("_15", y_variable) ~ "15%",
+      grepl("_25", y_variable) ~ "25%"
+    ),
+    # set factor levels for order
+    missingness  = factor(missingness,  levels = c("5%", "15%", "25%")),
+    mechanism    = factor(mechanism,    levels = c("MCAR", "MAR", "MNAR")),
+    Trial_Design = factor(Trial_Design, levels = c("More Pragmatic Trial", "More Explanatory Trial"))
+  ) %>%
+  mutate(bias_label = sprintf("%.2f", bias))
+
+# Create the plot with labels
+ggplot(combined_bias_df, aes(x = missingness, y = bias, fill = Trial_Design)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = bias_label), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.3, size = 2.8) +
+  facet_wrap(~mechanism) +
+  labs(title = "Bias by Missingness Type and Level",
+       x = "Missingness Percentage",
+       y = "Bias in Treatment Effect Estimate") +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        legend.title = element_blank())
+
+# Save the plot
+ggsave("Figure_4.6_Bias_Faceted_With_Labels.png", width = 9, height = 5.5, dpi = 300)
+
+
+```
+
+
+```{r}
+
+
+# Step 1: Convert pooled CCA results (lists) into data frames
+pooled_cca_high_df <- do.call(rbind, pooled_cca_high)
+pooled_cca_low_df  <- do.call(rbind, pooled_cca_low)
+
+# Step 2: Add trial design labels
+pooled_cca_high_df$Trial_Design <- "More Pragmatic Trial"
+pooled_cca_low_df$Trial_Design  <- "More Explanatory Trial"
+
+# Step 3: Combine into a single long-format data frame
+cca_combined <- bind_rows(pooled_cca_high_df, pooled_cca_low_df)
+
+# Step 4: Extract missing data mechanism and missingness percentage
+cca_combined <- cca_combined %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mar", y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR",
+      TRUE ~ NA_character_
+    ),
+    missing_pct = as.numeric(gsub(".*_(\\d+)$", "\\1", y_variable)),  # Extract 5, 15, 25
+    mechanism = factor(mechanism, levels = c("MCAR", "MAR", "MNAR"))
+  )
+
+# Step 5: Plot coverage with custom mechanism colors
+coverage_plot <- ggplot(cca_combined, aes(x = missing_pct, y = coverage, color = mechanism, group = mechanism)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  facet_wrap(~ Trial_Design) +
+  labs(
+    title = "Coverage Probability Across Missingness Levels (CCA)",
+    x = "Missingness Percentage (%)",
+    y = "Coverage (95% CI)",
+    color = "Missing Data Mechanism"
+  ) +
+  scale_x_continuous(breaks = c(5, 15, 25)) +
+  scale_y_continuous(limits = c(0.7, 1.0), breaks = seq(0.7, 1.0, 0.05)) +
+  scale_color_manual(values = c("MCAR" = "green", "MAR" = "blue", "MNAR" = "orange")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+# Optional: Save the plot
+ggsave("Figure_4.9_Coverage_Probability_CCA.png", plot = coverage_plot, width = 8, height = 5, dpi = 300)
+
+```
+
+#final heatmap of coverage CCA
+
+```{r}
+# Step 1: Convert pooled CCA results (lists) into data frames
+pooled_cca_high_df <- do.call(rbind, pooled_cca_high)
+pooled_cca_low_df  <- do.call(rbind, pooled_cca_low)
+
+# Step 2: Add trial design labels
+pooled_cca_high_df$Trial_Design <- "More Pragmatic Trial"
+pooled_cca_low_df$Trial_Design  <- "More Explanatory Trial"
+
+# Step 3: Combine into a single long-format data frame
+cca_combined <- bind_rows(pooled_cca_high_df, pooled_cca_low_df)
+
+# Step 4: Extract missing data mechanism and missingness percentage
+cca_combined <- cca_combined %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mar",  y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR",
+      TRUE ~ NA_character_
+    ),
+    missing_pct = factor(
+      gsub(".*_(\\d+)$", "\\1", y_variable),
+      levels = c("5", "15", "25"),
+      labels = c("5%", "15%", "25%")
+    ),
+    mechanism = factor(mechanism, levels = c("MCAR", "MAR", "MNAR")),
+    Trial_Design = factor(Trial_Design,
+                          levels = c("More Explanatory Trial", "More Pragmatic Trial")) # explanatory on top
+  )
+
+# Step 5: Heatmap of coverage
+coverage_heatmap <- ggplot(cca_combined, aes(x = missing_pct, y = Trial_Design, fill = coverage)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", coverage)), size = 3.2) +
+  facet_wrap(~ mechanism) +
+  scale_fill_gradientn(
+    colors = c("red", "yellow", "green"),
+    values = scales::rescale(c(0.7, 0.85, 0.90, 0.93, 0.95, 1)),
+    limits = c(0.7, 1),
+    name = "Coverage"
+  ) +
+  labs(
+    title = "Heatmap of Coverage Probability Across Missingness Levels (CCA)",
+    x = "Missingness Percentage",
+    y = "Trial Design"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text   = element_text(face = "bold", size = 12),
+    plot.title   = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.text    = element_text(size = 11),
+    legend.position = "right"
+  )
+
+# Save the plot
+ggsave("Figure_4.9_Coverage_Heatmap_CCA.png",
+       plot = coverage_heatmap, width = 8, height = 5, dpi = 300)
+```
+
+
+# 4.5.2 
+#line bias MI
+```{r}
+
+# Combine results from both trial designs
+results_mi_all <- rbind(results_mi_high, results_mi_low)
+
+# Optional: View combined table
+print(results_mi_all)
+
+# Optional: Save as CSV for inclusion in thesis
+write.csv(results_mi_all, "Table_4.5_MI_Results.csv", row.names = FALSE)
+
+# Prepare data for plotting
+mi_plot_data <- results_mi_all %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mar", y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR"
+    ),
+    missing_pct = as.numeric(gsub(".*_(\\d+)$", "\\1", y_variable)),
+    Trial_Design = factor(case_when(
+      pragmatism == "Low" ~ "More Explanatory Trial",
+      pragmatism == "High" ~ "More Pragmatic Trial"
+    ), levels = c("More Explanatory Trial", "More Pragmatic Trial")),
+    mechanism = factor(mechanism, levels = c("MCAR", "MAR", "MNAR"))
+  )
+
+# Plot Bias
+bias_plot <- ggplot(mi_plot_data, aes(x = missing_pct, y = bias, color = mechanism, group = mechanism)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  facet_wrap(~ Trial_Design) +
+  labs(
+    title = "Bias of Treatment Effect Estimates Across Missingness Levels (MI)",
+    x = "Missingness Percentage (%)",
+    y = "Bias",
+    color = "Missing Data Mechanism"
+  ) +
+  theme_minimal(base_size = 14) +
+  scale_x_continuous(breaks = c(5, 15, 25)) +
+  scale_y_continuous(limits = c(0, NA)) +  # start y-axis at 0
+  scale_color_manual(values = c("MCAR" = "green", "MAR" = "blue", "MNAR" = "red")) +
+  theme(legend.position = "bottom")
+
+# Optional: Save
+ggsave("Figure_4.10_Bias_MI.png", plot = bias_plot, width = 8, height = 5, dpi = 300)
+```
+
+# Bar Bias MI
+```{r}
+# Prepare MI dataset (similar transformations)
+mi_plot_data2 <- mi_plot_data %>%
+  mutate(
+    missingness = case_when(
+      missing_pct == 5  ~ "5%",
+      missing_pct == 15 ~ "15%",
+      missing_pct == 25 ~ "25%"
+    ),
+    missingness  = factor(missingness,  levels = c("5%", "15%", "25%")),
+    mechanism    = factor(mechanism,    levels = c("MCAR", "MAR", "MNAR")),
+    Trial_Design = factor(Trial_Design, levels = c("More Pragmatic Trial", "More Explanatory Trial")),
+    bias_label   = sprintf("%.2f", bias)
+  )
+
+# Plot with  preferred style
+bias_barplot <- ggplot(mi_plot_data2, aes(x = missingness, y = bias, fill = Trial_Design)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = bias_label), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.3, size = 2.8) +
+  facet_wrap(~mechanism) +
+  labs(
+    title = "Bias of Treatment Effect Estimates Across Missingness Levels (MI)",
+    x = "Missingness Percentage",
+    y = "Bias"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text   = element_text(size = 12),
+    axis.text    = element_text(size = 10),
+    legend.title = element_blank()
+  )
+
+# Save plot
+ggsave("Figure_4.20_Bias_MI_Bar_byMechanism.png", 
+       plot = bias_barplot, width = 8, height = 5, dpi = 300)
+
+
+```
+
+
+```{r}
+
+# Plot Coverage
+coverage_plot <- ggplot(mi_plot_data, aes(x = missing_pct, y = coverage, color = mechanism, group = mechanism)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  facet_wrap(~ Trial_Design) +
+  labs(
+    title = "Coverage Probability Across Missingness Levels (MI)",
+    x = "Missingness Percentage (%)",
+    y = "Coverage (95% CI)",
+    color = "Missing Data Mechanism"
+  ) +
+  theme_minimal(base_size = 14) +
+  scale_x_continuous(breaks = c(5, 15, 25)) +
+  scale_y_continuous(limits = c(0.6, 1.0), breaks = seq(0.6, 1.0, 0.05)) +
+  scale_color_manual(values = c("MCAR" = "green", "MAR" = "blue", "MNAR" = "red")) +
+  theme(legend.position = "bottom")
+
+# Optional: Save
+ggsave("Figure_4.11_Coverage_MI.png", plot = coverage_plot, width = 8, height = 5, dpi = 300)
+
+```
+
+
+
+# Heatmap coverage MI
+```{r}
+
+# Prepare MI coverage dataset for heatmap
+mi_coverage_df <- mi_plot_data %>%
+  mutate(
+    missingness = factor(paste0(missing_pct, "%"), levels = c("5%", "15%", "25%")),
+    mechanism   = factor(mechanism, levels = c("MCAR", "MAR", "MNAR")),
+    Trial_Design = factor(Trial_Design, 
+                          levels = c("More Explanatory Trial", "More Pragmatic Trial"))
+  )
+
+# Heatmap of Coverage (MI)
+coverage_heatmap_mi <- ggplot(mi_coverage_df, aes(x = missingness, y = Trial_Design, fill = coverage)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", coverage)), size = 3.2) +
+  facet_wrap(~ mechanism) +
+  scale_fill_gradientn(
+    colors = c("red", "yellow", "green"),
+    values = scales::rescale(c(0.7, 0.85, 0.90, 0.93, 0.95, 1)),
+    limits = c(0.7, 1),
+    name = "Coverage"
+  ) +
+  labs(
+    title = "Heatmap of Coverage Probability Across Missingness Levels (MI)",
+    x = "Missingness Percentage",
+    y = "Trial Design"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text   = element_text(face = "bold", size = 12),
+    plot.title   = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.text    = element_text(size = 11),
+    legend.position = "right"
+  )
+
+# Save the heatmap
+ggsave("Figure_4.30_Coverage_Heatmap_MI.png",
+       plot = coverage_heatmap_mi, width = 8, height = 5, dpi = 300)
+
+```
+
+
+# 4.5.3
+# heatmap MSE MLE
+```{r}
+# Add trial design labels
+results_mle_high$Trial_Design <- "More Pragmatic Trial"
+results_mle_low$Trial_Design  <- "More Explanatory Trial"
+
+# Combine MLE results from both trial designs
+results_mle_all <- rbind(results_mle_high, results_mle_low)
+
+# Save the combined results to CSV
+write.csv(results_mle_all, "Table_4.6_MLE_Results.csv", row.names = FALSE)
+
+# Print the data frame to view in console
+print(results_mle_all)
+
+# Prepare data for plotting
+mle_combined <- results_mle_all %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mar", y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR"
+    ),
+    mechanism = factor(mechanism, levels = c("MNAR", "MAR", "MCAR")),
+    missing_pct = as.numeric(gsub(".*_(\\d+)$", "\\1", y_variable)),
+    Trial_Design = factor(Trial_Design, levels = c("More Explanatory Trial", "More Pragmatic Trial")),
+    label_text = round(mse, 2)
+  )
+
+# Create heatmap with text labels
+p <- ggplot(mle_combined, aes(x = factor(missing_pct), y = mechanism, fill = mse)) +
+  geom_tile(color = "grey90") +
+  geom_text(aes(label = label_text), color = "black", size = 4.2, fontface = "bold") +
+  facet_wrap(~ Trial_Design) +
+  scale_fill_gradientn(
+    colors = c("#ffffff", "#f7f7f7", "#fddbc7", "#f4a582", "#d6604d"),
+    name = "MSE"
+  ) +
+  labs(
+    title = "Heatmap of MSE Across Missingness Mechanisms (MLE)",
+    x = "Missingness Percentage (%)",
+    y = "Missing Data Mechanism"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(strip.text = element_text(face = "bold"))
+
+# Print plot
+print(p)
+
+# Save the plot
+ggsave("Figure_4.12_Heatmap_MSE_MLE.png", plot = p, width = 8, height = 5, dpi = 300)
+
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1. Read  results table
+results_all <- read.csv("theoretical_mse_all_methods.csv")
+
+# 2. Prepare dataset for plotting
+results_plot <- results_all %>%
+  # 🔹 choose method here (e.g., MLE only)
+  filter(method == "MLE") %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mar",  y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR"
+    ),
+    mechanism    = factor(mechanism, levels = c("MNAR", "MAR", "MCAR")),
+    missing_pct  = as.numeric(gsub(".*_(\\d+)$", "\\1", y_variable)),
+    Trial_Design = factor(
+      Trial_Design,
+      levels = c("More Explanatory Trial", "More Pragmatic Trial")
+    ),
+    label_text   = round(mse_theoretical, 2)  # use theoretical MSE
+  )
+
+# 3. Heatmap for theoretical MSE
+p <- ggplot(results_plot,
+            aes(x = factor(missing_pct),
+                y = mechanism,
+                fill = mse_theoretical)) +
+  geom_tile(color = "grey90") +
+  geom_text(aes(label = label_text),
+            color = "black", size = 4.2, fontface = "bold") +
+  facet_wrap(~ Trial_Design) +
+  scale_fill_gradientn(
+    colors = c("#ffffff", "#f7f7f7", "#fddbc7", "#f4a582", "#d6604d"),
+    name = "Theoretical MSE"
+  ) +
+  labs(
+    title = "Heatmap of MSE Across Missingness Mechanisms (MLE)",
+    x = "Missingness Percentage (%)",
+    y = "Missing Data Mechanism"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(strip.text = element_text(face = "bold"))
+
+# 4. Print plot
+print(p)
+
+# 5. Save plot
+ggsave("Figure_Heatmap_MSE_Theoretical_MLE.png",
+       plot = p, width = 8, height = 5, dpi = 300)
+
+```
+
+
+
+# Heatmap coverage MLE
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# Prepare MLE coverage dataset for heatmap
+mle_coverage_df <- df_mle %>%
+  mutate(
+    coverage = ifelse(coverage > 1, coverage / 100, coverage),  # ensure proportion scale
+    missingness   = factor(paste0(missing_pct, "%"), levels = c("5%", "15%", "25%")),
+    mechanism     = factor(mechanism, levels = c("MCAR", "MAR", "MNAR")),
+    Trial_Design  = factor(Trial_Design, 
+                           levels = c("More Explanatory Trial", "More Pragmatic Trial"))
+  )
+
+# Heatmap of Coverage (MLE)
+coverage_heatmap_mle <- ggplot(mle_coverage_df, aes(x = missingness, y = Trial_Design, fill = coverage)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", coverage)), size = 3.2) +  # labels as decimals
+  facet_wrap(~ mechanism) +
+  scale_fill_gradientn(
+    colors = c("red", "yellow", "green"),
+    values = scales::rescale(c(0.70, 0.85, 0.90, 0.93, 0.95, 1.00)),
+    limits = c(0.70, 1.00),
+    name = "Coverage"
+  ) +
+  labs(
+    title = "Heatmap of Coverage Probability Across Missingness Levels (MLE)",
+    x = "Missingness Percentage",
+    y = "Trial Design"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text   = element_text(face = "bold", size = 12),
+    plot.title   = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.text    = element_text(size = 11),
+    legend.position = "right"
+  )
+
+# Save the heatmap
+ggsave("Figure_4.13_Coverage_Heatmap_MLE.png",
+       plot = coverage_heatmap_mle, width = 8, height = 5, dpi = 300)
+
+```
+
+
+# Bias lollipop MLE
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# 1) Load the saved table
+final_comparison_table <- read.csv("Final_Method_Comparison_Table.csv", stringsAsFactors = FALSE)
+
+# 2) Keep only MLE rows and derive mechanism, missing %, and facet labels
+df_mle <- final_comparison_table %>%
+  filter(Method == "MLE") %>%
+  mutate(
+    mechanism = case_when(
+      str_detect(Y_Variable, regex("mcar", ignore_case = TRUE)) ~ "MCAR",
+      str_detect(Y_Variable, regex("mar",  ignore_case = TRUE)) ~ "MAR",
+      str_detect(Y_Variable, regex("mnar", ignore_case = TRUE)) ~ "MNAR",
+      TRUE ~ NA_character_
+    ),
+    missing_pct  = as.numeric(str_extract(Y_Variable, "\\d+")),
+    Trial_Design = if_else(Pragmatism == "High",
+                           "More Pragmatic Trial", "More Explanatory Trial")
+  ) %>%
+  filter(!is.na(mechanism), !is.na(missing_pct))
+
+# 3) Order factors for nice layout
+df_mle <- df_mle %>%
+  mutate(
+    mechanism    = factor(mechanism, levels = c("MCAR","MAR","MNAR")),
+    missing_pct  = factor(missing_pct, levels = c(5,15,25)),
+    Trial_Design = factor(Trial_Design, levels = c("More Explanatory Trial","More Pragmatic Trial"))
+  )
+
+# 4) Lollipop plot with dodged stems/points (prevents overlap)
+pos <- position_dodge(width = 0.6)
+
+p <- ggplot(df_mle, aes(x = missing_pct, y = bias, color = mechanism, shape = mechanism)) +
+  geom_linerange(aes(ymin = 0, ymax = bias, group = mechanism), position = pos, linewidth = 1) +
+  geom_point(position = pos, size = 3, stroke = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ Trial_Design, nrow = 1) +
+  labs(
+    title = "Lollipop Plot of Bias Across Missingness Levels (MLE)",
+    x = "Missingness Percentage (%)",
+    y = "Bias",
+    color = "Missing Data Mechanism",
+    shape = "Missing Data Mechanism"
+  ) +
+  scale_color_manual(values = c("MCAR" = "green", "MAR" = "blue", "MNAR" = "red")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+print(p)
+ggsave("Figure_Lollipop_Bias_MLE_Pragma_vs_Expl.png", plot = p, width = 10, height = 5, dpi = 300)
+```
+
+
+#MLE bias bar
+```{r}
+# Add bias labels for plotting
+df_mle2 <- df_mle %>%
+  mutate(
+    missingness = factor(paste0(missing_pct, "%"), levels = c("5%", "15%", "25%")),
+    bias_label  = sprintf("%.2f", bias),
+    Trial_Design = factor(Trial_Design, 
+                          levels = c("More Pragmatic Trial", "More Explanatory Trial"))
+  )
+
+# Bar plot for Bias (MLE) in the same format as MI
+bias_barplot_mle <- ggplot(df_mle2, aes(x = missingness, y = bias, fill = Trial_Design)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = bias_label), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.3, size = 2.8) +
+  facet_wrap(~ mechanism) +
+  labs(
+    title = "Bias of Treatment Effect Estimates Across Missingness Levels (MLE)",
+    x = "Missingness Percentage",
+    y = "Bias"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text   = element_text(size = 12),
+    axis.text    = element_text(size = 10),
+    legend.title = element_blank()
+  )
+
+# Save the figure
+ggsave("Figure_Bias_MLE_Bar.png", plot = bias_barplot_mle, width = 8, height = 5, dpi = 300)
+
+```
+
+
+# trt effect error bar MLE bar
+
+```{r}
+
+
+# Combine pooled MLE results
+results_mle_high$Trial_Design <- "More Pragmatic Trial"
+results_mle_low$Trial_Design  <- "More Explanatory Trial"
+results_mle_all <- rbind(results_mle_high, results_mle_low)
+
+# Extract mechanism and missingness %
+results_mle_all <- results_mle_all %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mar", y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR"
+    ),
+    mechanism = factor(mechanism, levels = c("MCAR", "MAR", "MNAR")),
+    missing_pct = as.numeric(gsub(".*_(\\d+)$", "\\1", y_variable)),
+    Trial_Design = factor(Trial_Design, levels = c("More Explanatory Trial", "More Pragmatic Trial")),
+    CI_lower = estimate - 1.96 * se,
+    CI_upper = estimate + 1.96 * se
+  )
+
+# Plot: Point estimate + CI
+p <- ggplot(results_mle_all, aes(x = factor(missing_pct), y = estimate, color = mechanism)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.15, position = position_dodge(width = 0.4)) +
+  facet_wrap(~ Trial_Design) +
+  geom_hline(yintercept = -7, linetype = "dashed", color = "black") +
+  labs(
+    title = "Pooled MLE Treatment Effect Estimates and 95% CIs",
+    x = "Missingness Percentage (%)",
+    y = "Estimated Treatment Effect",
+    color = "Missing Data Mechanism"
+  ) +
+  scale_color_manual(values = c("MCAR" = "green", "MAR" = "blue", "MNAR" = "red")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+# Print plot
+print(p)
+
+# Save
+ggsave("Figure_4.14_Pooled_MLE_Estimates_CI.png", plot = p, width = 9, height = 6, dpi = 300)
+
+```
+
+
+#4.5.4
+#bias compare
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Combine all pooled results
+summary_all <- bind_rows(
+  pooled_cca_high_df %>%
+    rename(estimate = pooled_estimate, se = pooled_se) %>%
+    mutate(Trial_Design = "More Pragmatic Trial", method = "CCA"),
+
+  pooled_cca_low_df %>%
+    rename(estimate = pooled_estimate, se = pooled_se) %>%
+    mutate(Trial_Design = "More Explanatory Trial", method = "CCA"),
+
+  results_mi_high %>% mutate(Trial_Design = "More Pragmatic Trial", method = "MI"),
+  results_mi_low  %>% mutate(Trial_Design = "More Explanatory Trial", method = "MI"),
+
+  results_mle_high %>% mutate(Trial_Design = "More Pragmatic Trial", method = "MLE"),
+  results_mle_low  %>% mutate(Trial_Design = "More Explanatory Trial", method = "MLE")
+)
+
+# Add mechanism, bias, and combined facet label
+summary_all <- summary_all %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mar", y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR",
+      TRUE ~ "Full"
+    ),
+    missing_pct = as.numeric(gsub("[^0-9]", "", y_variable)),
+    missing_pct = ifelse(is.na(missing_pct), 0, missing_pct),
+    bias = estimate + 7,
+    facet_label = paste(mechanism, "|", Trial_Design)
+  )
+
+# Explicit facet order: explanatory top, pragmatic bottom
+desired_order <- c(
+  "MCAR | More Explanatory Trial",
+  "MAR | More Explanatory Trial",
+  "MNAR | More Explanatory Trial",
+  "MCAR | More Pragmatic Trial",
+  "MAR | More Pragmatic Trial",
+  "MNAR | More Pragmatic Trial"
+)
+
+summary_all <- summary_all %>%
+  mutate(facet_label = factor(facet_label, levels = desired_order))
+
+# Plot
+p <- ggplot(summary_all, aes(x = factor(missing_pct), y = bias, fill = method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.6) +
+  geom_text(aes(label = round(bias, 2), vjust = ifelse(bias < 0, 1.2, -0.4)),
+          position = position_dodge(width = 0.8), size = 3.5, color = "black") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.6) +
+  facet_wrap(~ facet_label, ncol = 3) +
+  labs(
+    title = "Bias of Estimated Treatment Effects by Missingness Mechanism and Trial Design",
+    x = "% Missing Data",
+    y = "Bias (Estimate - True Effect)",
+    fill = "Method"
+  ) +
+  scale_fill_manual(values = c("CCA" = "red", "MI" = "green", "MLE" = "blue")) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 9),
+    axis.text.x = element_text(angle = 0, vjust = 0.5)
+  )
+
+# Print plot
+print(p)
+
+# Save figure
+ggsave("Figure_4.15_Bias_Comparison.png", plot = p, width = 12, height = 8, dpi = 300)
+
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Read  saved file
+df <- read.csv("Final_Method_Comparison_Table.csv")
+
+# Prepare data
+df <- df %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mcar", Y_Variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mar",  Y_Variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mnar", Y_Variable, ignore.case = TRUE) ~ "MNAR",
+      TRUE ~ NA_character_
+    ),
+    missing_pct = as.numeric(gsub("[^0-9]", "", Y_Variable)),
+    Trial_Design = ifelse(Pragmatism == "High", "More Pragmatic Trial", "More Explanatory Trial"),
+    facet_label = paste(mechanism, "|", Trial_Design)
+  ) %>%
+  filter(!is.na(mechanism))  # drop Full Data rows
+
+# Facet order
+desired_order <- c(
+  "MCAR | More Explanatory Trial", "MAR | More Explanatory Trial", "MNAR | More Explanatory Trial",
+  "MCAR | More Pragmatic Trial",  "MAR | More Pragmatic Trial",  "MNAR | More Pragmatic Trial"
+)
+
+df$facet_label <- factor(df$facet_label, levels = desired_order)
+df$missing_pct <- factor(df$missing_pct, levels = c(5, 15, 25))
+
+# Plot MSE
+p_mse <- ggplot(df, aes(x = missing_pct, y = mse, fill = Method)) +
+ geom_bar(stat = "identity", position = position_dodge(width = 0.6), width = 0.4) +
+geom_text(aes(label = round(mse, 2)), 
+          position = position_dodge(width = 0.6),   # match dodge width with bars
+          vjust = -0.3, size = 2, color = "black") +
+  facet_wrap(~ facet_label, ncol = 3) +
+  labs(
+    title = "MSE of Estimated Treatment Effects by Missingness Mechanism and Trial Design",
+    x = "% Missing Data",
+    y = "Mean Squared Error (MSE)",
+    fill = "Method"
+  ) +
+  scale_fill_manual(values = c("CCA" = "red", "MI" = "green", "MLE" = "blue")) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 9),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7)
+
+  )
+
+print(p_mse)
+ggsave("Figure_4.16_MSE_Comparison.png", plot = p_mse, width = 12, height = 8, dpi = 300)
+
+
+```
+
+
+
+# Coverage
+
+```{r}
+# Combine and prepare summary results
+summary_all <- bind_rows(
+  pooled_cca_high_df %>% rename(estimate = pooled_estimate, se = pooled_se) %>% mutate(pragmatism = "More Explanatory Trial", method = "CCA"),
+  pooled_cca_low_df  %>% rename(estimate = pooled_estimate, se = pooled_se) %>% mutate(pragmatism = "More Pragmatic Trial", method = "CCA"),
+  results_mi_high    %>% mutate(pragmatism = "More Explanatory Trial", method = "MI"),
+  results_mi_low     %>% mutate(pragmatism = "More Pragmatic Trial", method = "MI"),
+  results_mle_high   %>% mutate(pragmatism = "More Explanatory Trial", method = "MLE"),
+  results_mle_low    %>% mutate(pragmatism = "More Pragmatic Trial", method = "MLE")
+) %>%
+  mutate(
+    mechanism = case_when(
+      grepl("mcar", y_variable, ignore.case = TRUE) ~ "MCAR",
+      grepl("mar", y_variable, ignore.case = TRUE) ~ "MAR",
+      grepl("mnar", y_variable, ignore.case = TRUE) ~ "MNAR",
+      TRUE ~ "Full"
+    ),
+    mechanism = factor(mechanism, levels = c("MCAR", "MAR", "MNAR")),
+    pragmatism = factor(pragmatism, levels = c("More Explanatory Trial", "More Pragmatic Trial")),
+    missing_pct = as.numeric(gsub("[^0-9]", "", y_variable)),
+    missing_pct = ifelse(is.na(missing_pct), 0, missing_pct),
+    bias = estimate + 7,
+    ci_width = 2 * 1.96 * se
+  )
+
+# Create combined facet label for better control
+summary_all <- summary_all %>%
+  mutate(
+    facet_label = paste(mechanism, pragmatism, sep = " | "),
+    facet_label = factor(facet_label, levels = c(
+      "MCAR | More Explanatory Trial",
+      "MAR | More Explanatory Trial", 
+      "MNAR | More Explanatory Trial",
+      "MCAR | More Pragmatic Trial",
+       "MAR | More Pragmatic Trial",
+      "MNAR | More Pragmatic Trial"
+    ))
+  )
+
+
+# === Coverage Line Plot ===
+library(ggplot2)
+p <- ggplot(summary_all, aes(x = missing_pct, y = coverage, color = method, group = method)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3.5) +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "black") +
+  facet_wrap(~ facet_label, ncol = 3) +  # 3 across: MCAR, MAR, MNAR, stacked Explanatory over Pragmatic
+  labs(title = "Coverage of 95% CI Across Scenarios", x = "% Missing Data", y = "Coverage", color = "Method") +
+  scale_x_continuous(breaks = c(5, 15, 25)) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 9),
+    axis.text.x = element_text(angle = 0, vjust = 0.5)
+  )
+
+# Print and save plot
+print(p)
+ggsave("Figure_4.16_Coverage_95CI_Across_Scenarios.png", plot = p, width = 12, height = 8, dpi = 300)
+
+
+# Create the summary table with all key metrics
+final_table <- summary_all %>%
+  select(y_variable, method, pragmatism, mechanism, missing_pct,
+         pooled_estimate = estimate,
+         pooled_se = se,
+         bias, mse, coverage)
+
+# View it (optional)
+View(final_table)
+
+# Export to CSV
+write.csv(final_table, "Final_Method_Comparison_Table.csv", row.names = FALSE)
+
+
+```
+
+
+
