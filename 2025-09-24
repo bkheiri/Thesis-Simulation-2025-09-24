@@ -1055,6 +1055,7 @@ results_mle_high <- do.call(rbind, lapply(names(summary_mle_high), function(y_va
     bias       = round(row["bias"], 2),
     mse        = round(row["mse"], 2),
     emp_mse    = round(as.numeric(row["emp.mse"]), 2),
+    mse_theoretical = round(row["bias"]^2 + row["emp.se"]^2, 2),  # Add theoretical MSE using emp_se
     coverage   = round(row["coverage"], 2),
     method     = "MLE",
     pragmatism = "High"
@@ -1073,6 +1074,7 @@ results_mle_low <- do.call(rbind, lapply(names(summary_mle_low), function(y_var)
     bias       = round(row["bias"], 2),
     mse        = round(row["mse"], 2),
     emp_mse    = round(as.numeric(row["emp.mse"]), 2),
+    mse_theoretical = round(row["bias"]^2 + row["emp.se"]^2, 2),  # Add theoretical MSE using emp_se
     coverage   = round(row["coverage"], 2),
     method     = "MLE",
     pragmatism = "Low"
